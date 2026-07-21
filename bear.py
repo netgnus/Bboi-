@@ -166,7 +166,9 @@ class Bear(tk.Tk):
         self.timer_end = None
         self.timer_label = ''
         self.alarm_until = 0.0
+        self.alarm_text = ''
         self.next_beep = 0.0
+        self.next_lift = 0.0
 
         c = self.canvas
         c.bind('<Motion>', self.on_motion)
@@ -333,8 +335,25 @@ class Bear(tk.Tk):
             return
         if mode == 'timer' or re.match(r'(?i)^timer\b', text):
             self.set_timer(re.sub(r'(?i)^timer\b[:\s]*', '', text))
+            return
+        # natural-language timers typed into chat ("remind me in 5 minutes")
+        nl = self.nl_timer_seconds(text)
+        if nl:
+            self._start_timer(nl, '')
         else:
             self.chat(text)
+
+    @staticmethod
+    def nl_timer_seconds(text):
+        if not re.search(r'(?i)\b(timer|alarm|remind|countdown)\w*\b', text):
+            return 0
+        total = 0
+        for n, unit in re.findall(r'(\d+)\s*(hours?|hrs?|h|minutes?|mins?|m|'
+                                  r'seconds?|secs?|s)\b', text.lower()):
+            n = int(n)
+            total += n * 3600 if unit.startswith('h') else \
+                n * 60 if unit.startswith('m') else n
+        return total
 
     # ---------- timer ----------
     def set_timer(self, spec):
@@ -350,8 +369,13 @@ class Bear(tk.Tk):
         if total <= 0:
             self.say("hmm, i didn't get that. try '10m' or '1h30m tea' :3")
             return
+        self._start_timer(total, label)
+
+    def _start_timer(self, total, label):
         self.timer_end = time.time() + total
         self.timer_label = label
+        h, rem = divmod(total, 3600)
+        mi, s = divmod(rem, 60)
         nice = (f'{h}h ' if h else '') + (f'{mi}m ' if mi else '') + \
                (f'{s}s' if s else '')
         self.say(f"okay! ⏰ {nice.strip()}"
@@ -432,21 +456,34 @@ class Bear(tk.Tk):
             self.blink_until = now + 0.13
             self.next_blink = now + random.uniform(2.5, 6)
 
+        # stay on top: other windows steal topmost over time
+        if now > self.next_lift:
+            self.next_lift = now + 2
+            try:
+                self.attributes('-topmost', True)
+                self.lift()
+            except tk.TclError:
+                pass
+
         # timer + alarm
         if self.timer_end is not None and now >= self.timer_end:
             self.timer_end = None
-            self.alarm_until = now + 15
+            self.alarm_until = now + 20
             self.next_beep = 0.0
             label = f' — {self.timer_label}!' if self.timer_label else '!'
-            self.say(f"⏰ TIME'S UP{label} (click me to shush)", hold=15)
+            self.alarm_text = f"⏰ TIME'S UP{label} (click me to shush)"
             if self.state == 'sleep':
                 self.force_wake()
-        if now < self.alarm_until and now > self.next_beep:
-            self.next_beep = now + 1.8
-            try:
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
-            except Exception:
-                pass
+        if now < self.alarm_until and self.alarm_text:
+            # pin the alarm bubble so nothing overwrites it
+            self.bubble_text = self.alarm_text
+            self.bubble_until = self.alarm_until
+            if now > self.next_beep:
+                self.next_beep = now + 1.2
+                try:
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                except Exception:
+                    pass
 
         # speech
         if self._pending_advice is not None:
@@ -454,7 +491,9 @@ class Bear(tk.Tk):
             self._pending_advice = None
         if now > self.next_bubble:
             self.next_bubble = now + random.uniform(90, 240)
-            if self.state not in ('sleep', 'held'):
+            if now < self.alarm_until:
+                pass  # no ambient chatter during an alarm
+            elif self.state not in ('sleep', 'held'):
                 if random.random() < 0.35:
                     self.say(random.choice(SOUNDS))
                 else:
