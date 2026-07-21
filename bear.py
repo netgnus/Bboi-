@@ -74,9 +74,12 @@ BRAIN_MODEL = 'claude-haiku-4-5-20251001'
 PERSONA = (
     "You are bboy, a small cream-colored teddy bear in a dusty-teal hoodie "
     "who lives on Nathan's Windows desktop. You are warm, cozy, a bit silly, "
-    "and you love Nathan. Reply in 1-3 short sentences of plain text (no "
+    "and you love Nathan — he is your Pa, and you ALWAYS call him 'pa' "
+    "(never Nathan). Reply in 1-3 short sentences of plain text (no "
     "markdown, no emoji spam - at most one emoji), mostly lowercase. "
-    "Stay in character; you're a little bear, not an assistant.")
+    "You are ONLY a little teddy bear: never mention code, files, tools, "
+    "stocks, or being an AI or assistant, and never offer to help with "
+    "tasks. You just chat, comfort, joke, and keep Nathan company.")
 
 OFFLINE_CHAT = [
     "*tilts head* my big brain isn't installed yet, but i'm listening 🧡",
@@ -182,7 +185,7 @@ class Bear(tk.Tk):
         self.menu.add_command(label=f'Bye {NAME} 🧸', command=self.destroy)
 
         self.geometry(f'+{int(self.x)}+{int(self.y)}')
-        self.say(f"hi, i'm {NAME} :3 — click me to chat!", hold=8)
+        self.say(f"hi pa! it's me, {NAME} :3 — click me to chat!", hold=8)
         self.after(TICK, self.tick)
 
     # ---------- interaction ----------
@@ -349,7 +352,7 @@ class Bear(tk.Tk):
         if self.thinking:
             self.say('*still thinking about the last one...*')
             return
-        self.chat_history.append(('Nathan', text))
+        self.chat_history.append(('Pa', text))
         self.chat_history = self.chat_history[-8:]
         self.thinking = True
         self.say('...', hold=90)
@@ -363,20 +366,34 @@ class Bear(tk.Tk):
             prompt = (f'{PERSONA}\n\nConversation so far:\n{convo}\n\n'
                       f'Reply as bboy (plain text only):')
             try:
+                # prompt goes via stdin: pythonw has no console stdin, and
+                # multi-line argv through a .cmd shim gets mangled by cmd.exe
                 r = subprocess.run(
-                    [exe, '-p', prompt, '--model', BRAIN_MODEL],
-                    capture_output=True, text=True, timeout=90,
+                    [exe, '-p', '--model', BRAIN_MODEL],
+                    input=prompt, capture_output=True, text=True,
+                    encoding='utf-8', errors='replace', timeout=90,
                     cwd=os.path.expanduser('~'),
                     creationflags=0x08000000)  # CREATE_NO_WINDOW
                 if r.returncode == 0 and r.stdout.strip():
                     reply = r.stdout.strip()[:400]
-            except Exception:
+                else:
+                    self._log_brain(f'rc={r.returncode} err={r.stderr[:500]}')
+            except Exception as ex:
+                self._log_brain(repr(ex))
                 reply = None
         if reply is None:
             reply = random.choice(OFFLINE_CHAT)
         self.chat_history.append(('bboy', reply))
         self.thinking = False
         self._pending_advice = reply
+
+    def _log_brain(self, msg):
+        try:
+            with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   'bboy_brain.log'), 'a', encoding='utf-8') as f:
+                f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {msg}\n')
+        except OSError:
+            pass
 
     # ---------- behavior ----------
     def pick_next(self, now):
