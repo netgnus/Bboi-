@@ -179,13 +179,12 @@ class Bear(tk.Tk):
         self.menu.add_command(label='Chat 💬', command=lambda: self.open_input('chat'))
         self.menu.add_command(label='Timer ⏰', command=lambda: self.open_input('timer'))
         self.menu.add_command(label='Advice 🔮', command=self.request_advice)
-        self.menu.add_command(label='Nap time 💤', command=self.force_nap)
-        self.menu.add_command(label='Wake up ☀️', command=self.force_wake)
+        self.menu.add_command(label='Nap time 💤', command=self.toggle_nap)
         self.menu.add_separator()
         self.menu.add_command(label=f'Bye {NAME} 🧸', command=self.destroy)
 
         self.geometry(f'+{int(self.x)}+{int(self.y)}')
-        self.say(f"hi pa! it's me, {NAME} :3 — click me to chat!", hold=8)
+        self.say(f"hi pa! it's me, {NAME} :3 — click me!", hold=8)
         self.after(TICK, self.tick)
 
     # ---------- interaction ----------
@@ -242,18 +241,29 @@ class Bear(tk.Tk):
                 self.alarm_until = 0.0   # shush the alarm
                 self.say('okay okay, shushing :3')
             else:
-                self.open_input('chat')
+                self.show_menu(e.x_root, e.y_root)
 
     def on_menu(self, e):
+        self.show_menu(e.x_root, e.y_root)
+
+    def show_menu(self, x, y):
         if self.timer_end is not None:
             left = max(0, int(self.timer_end - time.time()))
             self.menu.entryconfigure(1, label=f'Timer ⏰ ({left // 60}:{left % 60:02d} left)')
         else:
             self.menu.entryconfigure(1, label='Timer ⏰')
+        self.menu.entryconfigure(3, label='Wake up ☀️' if self.state == 'sleep'
+                                 else 'Nap time 💤')
         try:
-            self.menu.tk_popup(e.x_root, e.y_root)
+            self.menu.tk_popup(x, y)
         finally:
             self.menu.grab_release()
+
+    def toggle_nap(self):
+        if self.state == 'sleep':
+            self.force_wake()
+        else:
+            self.force_nap()
 
     def force_nap(self):
         self.state = 'sleep'
