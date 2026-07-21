@@ -9,11 +9,16 @@ Run silently with:  pythonw bear.py   (or double-click BearPet.vbs)
 import ctypes
 import json
 import math
+import os
 import random
+import re
+import shutil
+import subprocess
 import threading
 import time
 import tkinter as tk
 import urllib.request
+import winsound
 
 # ---------- palette (from the photo) ----------
 TRANS   = '#010203'
@@ -63,6 +68,33 @@ FALLBACK_ADVICE = [
 
 SOUNDS = ['*happy bear noises*', 'rawr! (friendly)', '*offers hug*',
           '*boop*', 'grumble grumble', '🧡', 'bboy!']
+
+# ---------- brain (Claude CLI if installed, cozy fallback if not) ----------
+BRAIN_MODEL = 'claude-haiku-4-5-20251001'
+PERSONA = (
+    "You are bboy, a small cream-colored teddy bear in a dusty-teal hoodie "
+    "who lives on Nathan's Windows desktop. You are warm, cozy, a bit silly, "
+    "and you love Nathan. Reply in 1-3 short sentences of plain text (no "
+    "markdown, no emoji spam - at most one emoji), mostly lowercase. "
+    "Stay in character; you're a little bear, not an assistant.")
+
+OFFLINE_CHAT = [
+    "*tilts head* my big brain isn't installed yet, but i'm listening 🧡",
+    "i heard you! my thinking brain is still on order though :3",
+    "*nods wisely* (i have no idea what you said, brain pending)",
+    "mrrf... words are hard without my brain. but i love you anyway.",
+]
+
+
+def find_claude():
+    exe = shutil.which('claude')
+    if exe:
+        return exe
+    for p in (os.path.expanduser(r'~\.local\bin\claude.exe'),
+              os.path.expandvars(r'%APPDATA%\npm\claude.cmd')):
+        if os.path.exists(p):
+            return p
+    return None
 
 
 def work_area():
@@ -124,6 +156,15 @@ class Bear(tk.Tk):
         self.next_bubble = now + random.uniform(15, 40)
         self._pending_advice = None
 
+        # chat + timer
+        self.chat_history = []       # list of (speaker, text)
+        self.thinking = False
+        self.input_win = None
+        self.timer_end = None
+        self.timer_label = ''
+        self.alarm_until = 0.0
+        self.next_beep = 0.0
+
         c = self.canvas
         c.bind('<Motion>', self.on_motion)
         c.bind('<Button-1>', self.on_press)
@@ -132,6 +173,8 @@ class Bear(tk.Tk):
         c.bind('<Button-3>', self.on_menu)
 
         self.menu = tk.Menu(self, tearoff=0)
+        self.menu.add_command(label='Chat 💬', command=lambda: self.open_input('chat'))
+        self.menu.add_command(label='Timer ⏰', command=lambda: self.open_input('timer'))
         self.menu.add_command(label='Advice 🔮', command=self.request_advice)
         self.menu.add_command(label='Nap time 💤', command=self.force_nap)
         self.menu.add_command(label='Wake up ☀️', command=self.force_wake)
@@ -139,7 +182,7 @@ class Bear(tk.Tk):
         self.menu.add_command(label=f'Bye {NAME} 🧸', command=self.destroy)
 
         self.geometry(f'+{int(self.x)}+{int(self.y)}')
-        self.say(f"hi, i'm {NAME} :3")
+        self.say(f"hi, i'm {NAME} :3 — click me to chat!", hold=8)
         self.after(TICK, self.tick)
 
     # ---------- interaction ----------
@@ -182,6 +225,7 @@ class Bear(tk.Tk):
         self.y = clamp(e.y_root - self.grab_dy, 0, self.floor)
 
     def on_release(self, e):
+        was_click = self.press_pos is not None and self.state != 'held'
         self.press_pos = None
         if self.state == 'held':
             if self.y < self.floor - 4:
@@ -190,8 +234,19 @@ class Bear(tk.Tk):
             else:
                 self.state = 'idle'
                 self.state_until = time.time() + random.uniform(2, 4)
+        elif was_click:
+            if time.time() < self.alarm_until:
+                self.alarm_until = 0.0   # shush the alarm
+                self.say('okay okay, shushing :3')
+            else:
+                self.open_input('chat')
 
     def on_menu(self, e):
+        if self.timer_end is not None:
+            left = max(0, int(self.timer_end - time.time()))
+            self.menu.entryconfigure(1, label=f'Timer ⏰ ({left // 60}:{left % 60:02d} left)')
+        else:
+            self.menu.entryconfigure(1, label='Timer ⏰')
         try:
             self.menu.tk_popup(e.x_root, e.y_root)
         finally:
@@ -217,11 +272,111 @@ class Bear(tk.Tk):
             text = random.choice(FALLBACK_ADVICE)
         self._pending_advice = text
 
-    def say(self, text):
+    def say(self, text, hold=None):
         self.bubble_text = text
-        self.bubble_until = time.time() + min(9.0, 3.0 + len(text) * 0.06)
+        self.bubble_until = time.time() + (hold if hold else
+                                           min(12.0, 3.0 + len(text) * 0.06))
         if self.state == 'sleep':
             self.force_wake()
+
+    # ---------- input box (chat / timer) ----------
+    def open_input(self, mode):
+        if self.input_win is not None:
+            try:
+                self.input_win.destroy()
+            except tk.TclError:
+                pass
+        win = tk.Toplevel(self)
+        self.input_win = win
+        win.overrideredirect(True)
+        win.attributes('-topmost', True)
+        win.configure(bg='#2a2a33')
+        hint = ('talk to bboy  (esc to close)' if mode == 'chat'
+                else 'timer: "10m", "1h30m", "25m tea"  (esc to close)')
+        tk.Label(win, text=hint, bg='#2a2a33', fg='#9aa0b0',
+                 font=('Segoe UI', 8)).pack(padx=8, pady=(6, 0), anchor='w')
+        entry = tk.Entry(win, width=36, bg='#1c1c22', fg='#e8e8f0',
+                         insertbackground='#e8e8f0', relief='flat',
+                         font=('Segoe UI', 10))
+        entry.pack(padx=8, pady=(2, 8), ipady=4)
+        ix = int(clamp(self.x + CX - 140, 0, self.winfo_screenwidth() - 290))
+        win.geometry(f'+{ix}+{int(self.y) + 130}')
+        entry.bind('<Return>', lambda e: self.submit_input(mode, entry.get()))
+        entry.bind('<Escape>', lambda e: self.close_input())
+        win.after(80, lambda: (win.focus_force(), entry.focus_set()))
+
+    def close_input(self):
+        if self.input_win is not None:
+            try:
+                self.input_win.destroy()
+            except tk.TclError:
+                pass
+            self.input_win = None
+
+    def submit_input(self, mode, text):
+        text = text.strip()
+        self.close_input()
+        if not text:
+            return
+        if mode == 'timer' or re.match(r'(?i)^timer\b', text):
+            self.set_timer(re.sub(r'(?i)^timer\b[:\s]*', '', text))
+        else:
+            self.chat(text)
+
+    # ---------- timer ----------
+    def set_timer(self, spec):
+        m = re.match(r'(?i)^\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?'
+                     r'\s*(.*)$', spec)
+        h, mi, s = (int(x) if x else 0 for x in m.groups()[:3])
+        label = m.group(4).strip()
+        if h == mi == s == 0:
+            bare = re.match(r'^\s*(\d+)\s*(.*)$', spec)
+            if bare:
+                mi, label = int(bare.group(1)), bare.group(2).strip()
+        total = h * 3600 + mi * 60 + s
+        if total <= 0:
+            self.say("hmm, i didn't get that. try '10m' or '1h30m tea' :3")
+            return
+        self.timer_end = time.time() + total
+        self.timer_label = label
+        nice = (f'{h}h ' if h else '') + (f'{mi}m ' if mi else '') + \
+               (f'{s}s' if s else '')
+        self.say(f"okay! ⏰ {nice.strip()}"
+                 + (f' for "{label}"' if label else '') + " — i'll yell :3")
+
+    # ---------- chat brain ----------
+    def chat(self, text):
+        if self.thinking:
+            self.say('*still thinking about the last one...*')
+            return
+        self.chat_history.append(('Nathan', text))
+        self.chat_history = self.chat_history[-8:]
+        self.thinking = True
+        self.say('...', hold=90)
+        threading.Thread(target=self._think, daemon=True).start()
+
+    def _think(self):
+        reply = None
+        exe = find_claude()
+        if exe:
+            convo = '\n'.join(f'{s}: {t}' for s, t in self.chat_history)
+            prompt = (f'{PERSONA}\n\nConversation so far:\n{convo}\n\n'
+                      f'Reply as bboy (plain text only):')
+            try:
+                r = subprocess.run(
+                    [exe, '-p', prompt, '--model', BRAIN_MODEL],
+                    capture_output=True, text=True, timeout=90,
+                    cwd=os.path.expanduser('~'),
+                    creationflags=0x08000000)  # CREATE_NO_WINDOW
+                if r.returncode == 0 and r.stdout.strip():
+                    reply = r.stdout.strip()[:400]
+            except Exception:
+                reply = None
+        if reply is None:
+            reply = random.choice(OFFLINE_CHAT)
+        self.chat_history.append(('bboy', reply))
+        self.thinking = False
+        self._pending_advice = reply
 
     # ---------- behavior ----------
     def pick_next(self, now):
@@ -249,6 +404,22 @@ class Bear(tk.Tk):
         if now > self.next_blink:
             self.blink_until = now + 0.13
             self.next_blink = now + random.uniform(2.5, 6)
+
+        # timer + alarm
+        if self.timer_end is not None and now >= self.timer_end:
+            self.timer_end = None
+            self.alarm_until = now + 15
+            self.next_beep = 0.0
+            label = f' — {self.timer_label}!' if self.timer_label else '!'
+            self.say(f"⏰ TIME'S UP{label} (click me to shush)", hold=15)
+            if self.state == 'sleep':
+                self.force_wake()
+        if now < self.alarm_until and now > self.next_beep:
+            self.next_beep = now + 1.8
+            try:
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            except Exception:
+                pass
 
         # speech
         if self._pending_advice is not None:
@@ -497,6 +668,8 @@ class Bear(tk.Tk):
         self.draw_particles()
         # shrink the whole bear around his feet, then speak at full size
         self.canvas.scale('all', CX, GROUND, SCALE, SCALE)
+        if now < self.alarm_until:   # excited alarm bouncing
+            self.canvas.move('all', 0, -abs(math.sin(self.phase * 1.6)) * 16)
         self.draw_bubble(now)
 
 
